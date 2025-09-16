@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>몬스터 체력 관리</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<style>
+:root{--bg:#0f1216;--text:#e8eef5;--card:#161b22;--accent:#62d4ff;--danger:#ff4d4d;--muted:#98a2b3}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Noto Sans,Apple SD Gothic Neo,sans-serif;background:var(--bg);color:var(--text)}
+.header{padding:12px;background:var(--card);display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,.08);position:sticky;top:0;z-index:10}
+.controls{display:flex;flex-wrap:wrap;gap:8px}
+button,input,textarea{border-radius:10px;border:1px solid rgba(255,255,255,.1);padding:10px 12px;background:var(--card);color:var(--text);outline:none;font-size:16px}
+button{cursor:pointer;-webkit-tap-highlight-color:transparent}
+.primary{background:var(--accent);color:#001018;border:none}
+.danger{background:var(--danger);color:#fff;border:none}
+.ghost{background:transparent}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;padding:12px}
+.card{background:var(--card);padding:12px;border-radius:14px;box-shadow:0 4px 10px rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.06);transition:filter .2s,opacity .2s}
+.card header{display:flex;gap:8px;justify-content:space-between;align-items:center;margin-bottom:6px}
+.title{flex:1;min-width:0}
+.state{font-size:12px;padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.12);opacity:.9;white-space:nowrap}
+.state.ok{background:#0f2a33}
+.state.warning{background:#302107;border-color:#5b4111}
+.state.dead{background:#3a0b0b;border-color:#5a1a1a}
+.hp-row{display:flex;gap:8px;margin:6px 0;align-items:center;flex-wrap:wrap}
+.hp-row input[type="number"]{flex:1;min-width:120px}
+.quick{display:flex;gap:6px;flex-wrap:wrap}
+.quick button{padding:8px 10px}
+.hp-bar-wrap{background:#333;border-radius:10px;overflow:hidden;height:24px;position:relative}
+.hp-bar{height:100%;width:100%;background:var(--accent);transition:width .2s ease,background .2s ease}
+.hp-bar-wrap .pct{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;color:#001018;font-weight:700;mix-blend-mode:screen}
+.debuff{width:100%;min-height:72px;margin-top:6px;resize:vertical}
+.card.dead{opacity:.65;filter:grayscale(0.6)}
+footer.small{padding:8px 12px;color:var(--muted);font-size:12px}
+input[type="file"]{display:none}
+kbd{background:#0d1117;border:1px solid #23262d;border-radius:6px;padding:2px 6px;font-size:12px}
+/* Big touch targets on tablets */
+button, .qbtn{min-height:40px}
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1 style="font-size:18px;margin:0">몬스터 체력 관리</h1>
+    <div class="controls">
+      <button id="addCalc" class="primary">＋ 추가</button>
+      <button id="resetAll" title="모든 카드 현재 HP를 초기 HP로">전체 리셋</button>
+      <button id="clearCalcs" class="danger" title="모든 카드 삭제">모두 지우기</button>
+      <button id="exportBtn" class="ghost" title="JSON으로 내보내기">내보내기</button>
+      <label class="ghost" style="cursor:pointer" title="JSON에서 가져오기">
+        가져오기<input id="importInput" type="file" accept="application/json" />
+      </label>
+    </div>
+  </div>
+
+  <div id="calcGrid" class="grid" aria-live="polite"></div>
+
+  <footer class="small">
+    팁: 각 카드는 자동 저장됩니다. 다른 기기로 옮길 땐 내보내기/가져오기 사용.
+  </footer>
+
+<script>
+(function(){
+  const grid = document.getElementById('calcGrid');
+  const LS_KEY = 'hpTracker.v2';
+  const genId = () => 'id-' + Math.random().toString(36).slice(2,9);
+
+  let state = load() || { cards: [] };
+  function save(){ localStorage.setItem(LS_KEY, JSON.stringify(state)); }
+  function load(){ try{ return JSON.parse(localStorage.getItem(LS_KEY) || ''); }catch{ return null; } }
+
+  function render(){ grid.innerHTML=''; state.cards.forEach(card => grid.appendChild(renderCard(card))); }
+  function pct(n){ return Math.round(n*100); }
+  function clamp(n, min=0, max=Infinity){ return Math.min(max, Math.max(min, n|0)); }
+  function hpState(card){
+    if(card.init <= 0) return 'ok';
+    if(card.current <= 0) return 'dead';
+    const r = card.current / card.init;
+    if(r <= 0.5) return 'warning';
+    return 'ok';
+  }
+
+  function renderCard(card){
+    const wrap = document.createElement('div');
+    wrap.className = 'card';
+    wrap.dataset.id = card.id;
+    const ratio = (card.init>0) ? card.current/card.init : 1;
+    const percent = card.init>0 ? pct(ratio) : 0;
+    const st = hpState(card);
+
+    wrap.innerHTML = \`
+      <header>
+        <input class="title" value="\${escapeHtml(card.name)}" aria-label="이름" />
+        <span class="state \${st}">\${st==='dead'?'전투불능':(st==='warning'?'위태로움':'정상')}</span>
+        <button class="danger delBtn" title="삭제">✕</button>
+      </header>
+
+      <div class="hp-row">
+        <input type="number" class="initHp" placeholder="초기 HP" value="\${card.init||''}" aria-label="초기 HP">
+        <button class="primary resetBtn" title="현재 HP를 초기 HP로">리셋</button>
+      </div>
+
+      <div class="hp-row">
+        <input type="number" class="curHp" placeholder="현재 HP" value="\${card.current||0}" aria-label="현재 HP">
+        <input type="number" class="dmg" placeholder="피해/치유(+)" aria-label="피해 혹은 치유 값">
+        <button class="applyBtn" title="피해/치유 적용">적용</button>
+      </div>
+
+      <div class="hp-row quick">
+        <button class="qbtn" data-delta="-1">-1</button>
+        <button class="qbtn" data-delta="-5">-5</button>
+        <button class="qbtn" data-delta="-10">-10</button>
+        <button class="qbtn" data-delta="+1">+1</button>
+        <button class="qbtn" data-delta="+5">+5</button>
+        <button class="qbtn" data-delta="+10">+10</button>
+      </div>
+
+      <div class="hp-row" aria-live="polite">
+        <span>남은 HP:</span><strong class="remain">\${card.current|0}</strong>
+        <span style="margin-left:auto;color:#9aa4b2;font-size:12px">(\${percent}%)</span>
+      </div>
+
+      <div class="hp-bar-wrap" title="\${percent}%">
+        <div class="hp-bar" style="width:\${percent}%;background:\${(card.init>0 && ratio<=0.5)?'var(--danger)':'var(--accent)'}"></div>
+        <div class="pct">\${percent}%</div>
+      </div>
+
+      <textarea class="debuff" placeholder="디버프 메모…" aria-label="디버프 메모">\${escapeHtml(card.memo||'')}</textarea>
+    \`;
+
+    const titleI = wrap.querySelector('.title');
+    const initHpI = wrap.querySelector('.initHp');
+    const curHpI  = wrap.querySelector('.curHp');
+    const dmgI    = wrap.querySelector('.dmg');
+    const remain  = wrap.querySelector('.remain');
+    const bar     = wrap.querySelector('.hp-bar');
+    const pctText = wrap.querySelector('.pct');
+    const stateEl = wrap.querySelector('.state');
+    const memoI   = wrap.querySelector('.debuff');
+
+    function applyDeadStyle(){
+      const s = hpState(card);
+      wrap.classList.toggle('dead', s==='dead');
+      stateEl.className = 'state ' + s;
+      stateEl.textContent = s==='dead' ? '전투불능' : (s==='warning' ? '위태로움' : '정상');
+    }
+
+    function updateBarAndUI(){
+      if(card.init <= 0){
+        bar.style.width = '0%';
+        bar.style.background = 'var(--accent)';
+        pctText.textContent = '0%';
+        remain.textContent = '-';
+        curHpI.value = '';
+        applyDeadStyle();
+        return;
+      }
+      card.current = clamp(card.current, 0, card.init);
+      const r = (card.current / card.init);
+      const p = pct(r);
+      bar.style.width = p + '%';
+      bar.style.background = (r<=0.5) ? 'var(--danger)' : 'var(--accent)';
+      pctText.textContent = p + '%';
+      remain.textContent = card.current;
+      curHpI.value = card.current;
+      applyDeadStyle();
+    }
+
+    titleI.addEventListener('input', ()=>{ card.name = titleI.value; save(); });
+    wrap.querySelector('.resetBtn').addEventListener('click', ()=>{
+      if(card.init > 0){ card.current = card.init; save(); updateBarAndUI(); }
+    });
+    wrap.querySelector('.applyBtn').addEventListener('click', ()=>{
+      const maybeInit = parseInt(initHpI.value);
+      if(!isNaN(maybeInit)){ card.init = clamp(maybeInit,0,999999); }
+      if(card.init>0 && card.current===0 && (parseInt(curHpI.value)||0)===0){ card.current = card.init; }
+      const delta = parseInt(dmgI.value)||0;
+      card.current = clamp(card.current - delta, 0, card.init);
+      dmgI.value=''; save(); updateBarAndUI();
+    });
+    curHpI.addEventListener('input', ()=>{
+      const maybeInit = parseInt(initHpI.value);
+      if(!isNaN(maybeInit)){ card.init = clamp(maybeInit,0,999999); }
+      const v = parseInt(curHpI.value)||0;
+      card.current = clamp(v, 0, card.init||0);
+      save(); updateBarAndUI();
+    });
+    initHpI.addEventListener('input', ()=>{
+      const v = parseInt(initHpI.value)||0;
+      const prevInit = card.init;
+      card.init = clamp(v,0,999999);
+      if(card.init !== prevInit && card.init > 0 && card.current > card.init){ card.current = card.init; }
+      save(); updateBarAndUI();
+    });
+    wrap.querySelectorAll('.qbtn').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        if(card.init <= 0) return;
+        const delta = parseInt(btn.dataset.delta);
+        card.current = clamp(card.current + delta, 0, card.init);
+        save(); updateBarAndUI();
+      });
+    });
+    memoI.addEventListener('input', ()=>{ card.memo = memoI.value; save(); });
+
+    wrap.querySelector('.delBtn').addEventListener('click', ()=>{
+      const idx = state.cards.findIndex(x=>x.id===card.id);
+      if(idx>=0){ state.cards.splice(idx,1); save(); render(); }
+    });
+
+    return wrap;
+  }
+
+  function addCard(name='몬스터'){
+    const card = { id: genId(), name, init: 0, current: 0, memo: '' };
+    state.cards.push(card);
+    save();
+    const node = renderCard(card);
+    grid.appendChild(node);
+    node.querySelector('.title').focus();
+  }
+
+  document.getElementById('addCalc').onclick = ()=> addCard('몬스터');
+  document.getElementById('clearCalcs').onclick = ()=>{
+    if(confirm('모든 카드를 삭제할까요? 이 동작은 되돌릴 수 없습니다.')){
+      state.cards = []; save(); render();
+    }
+  };
+  document.getElementById('resetAll').onclick = ()=>{
+    state.cards.forEach(c=>{ if(c.init>0) c.current=c.init; });
+    save(); render();
+  };
+
+  document.getElementById('exportBtn').onclick = ()=>{
+    const blob = new Blob([JSON.stringify(state,null,2)], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'monster-hp.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  document.getElementById('importInput').addEventListener('change', async (e)=>{
+    const file = e.target.files?.[0];
+    if(!file) return;
+    try{
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if(!data || !Array.isArray(data.cards)) throw new Error('형식 오류');
+      state.cards = data.cards.map(c=>({
+        id: c.id || genId(),
+        name: String(c.name ?? '몬스터'),
+        init: clamp(parseInt(c.init)||0,0,999999),
+        current: clamp(parseInt(c.current)||0,0,parseInt(c.init)||0),
+        memo: String(c.memo ?? '')
+      }));
+      save(); render();
+    }catch(err){
+      alert('가져오기에 실패했습니다: ' + (err?.message||err));
+    }finally{
+      e.target.value = '';
+    }
+  });
+
+  function escapeHtml(s){ return String(s).replace(/[&<>\"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',\"'\":'&#39;' }[m])); }
+
+  if(!state.cards.length){ addCard('몬스터1'); }
+  else { render(); }
+})();
+</script>
+</body>
+</html>
